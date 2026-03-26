@@ -1,0 +1,148 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  
+  body {
+    background: #060612;
+    color: #e8e8f0;
+    font-family: 'DM Sans', sans-serif;
+    overflow-x: hidden;
+  }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #0d0d1a; }
+  ::-webkit-scrollbar-thumb { background: #00ff87; border-radius: 2px; }
+}
+
+@layer components {
+  .glass {
+    background: rgba(17, 17, 39, 0.7);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .neon-border {
+    border: 1px solid #00ff8740;
+    box-shadow: 0 0 20px #00ff8715, inset 0 0 20px #00ff8705;
+  }
+
+  .neon-border:hover {
+    border-color: #00ff8780;
+    box-shadow: 0 0 30px #00ff8730, inset 0 0 30px #00ff8710;
+  }
+
+  .stat-card {
+    @apply glass rounded-2xl p-6 relative overflow-hidden;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+  }
+
+  .btn-neon {
+    background: linear-gradient(135deg, #00ff87, #00d4ff);
+    color: #060612;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    transition: all 0.2s ease;
+    box-shadow: 0 0 20px #00ff8740;
+  }
+
+  .btn-neon:hover {
+    box-shadow: 0 0 40px #00ff8780;
+    transform: translateY(-1px);
+  }
+
+  .btn-stop {
+    background: linear-gradient(135deg, #ff2d78, #ff6b35);
+    color: white;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    transition: all 0.2s ease;
+    box-shadow: 0 0 20px #ff2d7840;
+  }
+
+  .btn-stop:hover {
+    box-shadow: 0 0 40px #ff2d7880;
+    transform: translateY(-1px);
+  }
+
+  .status-badge {
+    @apply px-2.5 py-1 rounded-full text-xs font-mono font-medium;
+  }
+
+  .tab-active {
+    background: linear-gradient(135deg, #00ff8720, #00d4ff20);
+    border-bottom: 2px solid #00ff87;
+    color: #00ff87;
+  }
+
+  .input-field {
+    @apply glass rounded-xl px-4 py-3 text-sm outline-none w-full;
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #e8e8f0;
+    transition: border-color 0.2s;
+  }
+
+  .input-field:focus {
+    border-color: #00ff8760;
+    box-shadow: 0 0 0 3px #00ff8710;
+  }
+
+  .noise-bg::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 0;
+  }
+}
+
+/* Animated background grid */
+.grid-bg {
+  background-image: 
+    linear-gradient(rgba(0,255,135,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,255,135,0.03) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+/* Status colors */
+.status-applied { background: #00ff8720; color: #00ff87; border: 1px solid #00ff8740; }
+.status-shortlisted { background: #c8ff0020; color: #c8ff00; border: 1px solid #c8ff0040; }
+.status-rejected { background: #ff2d7820; color: #ff2d78; border: 1px solid #ff2d7840; }
+.status-pending { background: #ff8c0020; color: #ff8c00; border: 1px solid #ff8c0040; }
+.status-interview { background: #00d4ff20; color: #00d4ff; border: 1px solid #00d4ff40; }
+.status-found { background: #8b5cf620; color: #8b5cf6; border: 1px solid #8b5cf640; }
+
+/* Pulse dot */
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.pulse-dot.green { background: #00ff87; box-shadow: 0 0 10px #00ff87; }
+.pulse-dot.red { background: #ff2d78; box-shadow: 0 0 10px #ff2d78; }
+
+/* Log terminal */
+.log-terminal {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Chart custom */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #111127 !important;
+  border: 1px solid #1e1e3f !important;
+  border-radius: 12px !important;
+}
