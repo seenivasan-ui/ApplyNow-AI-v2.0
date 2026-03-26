@@ -2,20 +2,45 @@
 ApplyNow - AI-Powered Job Hunter Backend
 FastAPI + MongoDB + Claude AI + WhatsApp + Gmail
 """
-import os, asyncio, threading, time, json
+import os, asyncio, json
 from datetime import datetime, timedelta
 from typing import Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from pymongo import MongoClient, DESCENDING
 from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="ApplyNow API", version="2.0")
+# ── STARTUP VALIDATION ───────────────────────────────
+def _validate_env():
+    """Log warnings for missing/optional config at startup."""
+    required = {"ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY")}
+    optional = {
+        "MONGO_URI": os.getenv("MONGO_URI"),
+        "WHATSAPP_TOKEN": os.getenv("WHATSAPP_TOKEN"),
+        "WHATSAPP_PHONE_ID": os.getenv("WHATSAPP_PHONE_ID"),
+        "YOUR_WHATSAPP": os.getenv("YOUR_WHATSAPP"),
+    }
+    for key, val in required.items():
+        if not val:
+            print(f"[WARN] Required env var {key!r} is not set — AI scoring will be skipped")
+    for key, val in optional.items():
+        if not val:
+            print(f"[INFO] Optional env var {key!r} is not set — related feature disabled")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _validate_env()
+    print("[INFO] ApplyNow API started successfully")
+    yield
+    print("[INFO] ApplyNow API shutting down")
+
+app = FastAPI(title="ApplyNow API", version="2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,18 +49,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── HEALTH CHECK ─────────────────────────────────────
+@app.get("/health")
+def health_check():
+    """Railway health check endpoint."""
+    return JSONResponse({"status": "ok", "version": "2.0"})
+
 # ── DB ──────────────────────────────────────────────
 MONGO_URI = os.getenv("MONGO_URI", "")
 _client = None
 
 def get_db():
     global _client
+    if not MONGO_URI:
+        return None
     try:
         if not _client:
             _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            # Verify connection is alive
+            _client.admin.command("ping")
         return _client["applynow"]
     except Exception as e:
-        print(f"DB error: {e}")
+        print(f"[WARN] DB connection failed: {e}")
+        _client = None
         return None
 
 # ── AGENT STATE ─────────────────────────────────────
@@ -254,8 +290,6 @@ def get_notifications():
 # ── AGENT CORE LOOP ──────────────────────────────────
 async def run_agent_loop():
     """Main agent loop - runs forever until stopped"""
-    import importlib
-
     while agent_state["running"]:
         now = datetime.now()
         hour = now.hour
@@ -267,7 +301,9 @@ async def run_agent_loop():
             agent_state["applied_today"] = 0
 
             try:
-                await run_full_cycle()
+                await asyncio.wait_for(run_full_cycle(), timeout=1800)  # 30-min hard cap
+            except asyncio.TimeoutError:
+                log("❌ Agent cycle timed out after 30 minutes", "error")
             except Exception as e:
                 log(f"❌ Agent cycle error: {e}", "error")
 
@@ -338,9 +374,15 @@ async def scrape_all_platforms():
 
     for name, func in platforms:
         try:
-            platform_jobs = await asyncio.to_thread(func, roles, locations)
+            # Run blocking scrapers in a thread with a per-platform timeout
+            platform_jobs = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, func, roles, locations),
+                timeout=30,
+            )
             jobs.extend(platform_jobs)
             log(f"  ✅ {name}: {len(platform_jobs)} jobs", "info")
+        except asyncio.TimeoutError:
+            log(f"  ❌ {name} timed out", "error")
         except Exception as e:
             log(f"  ❌ {name} failed: {e}", "error")
 
@@ -494,8 +536,20 @@ def save_new_jobs(jobs, db):
 
 async def score_jobs(jobs, db):
     """Score jobs using Claude AI"""
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        log("⚠️ ANTHROPIC_API_KEY not set — skipping AI scoring, passing all jobs through", "warn")
+        for job in jobs:
+            job["ats_score"] = 50
+            job["verdict"] = "Unscored"
+        return jobs[:20]
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except Exception as e:
+        log(f"⚠️ Failed to init Anthropic client: {e}", "warn")
+        return jobs[:20]
 
     profile = db.profile.find_one({}, {"_id": 0}) if db else {}
     skills = profile.get("skills", [])
@@ -505,18 +559,24 @@ async def score_jobs(jobs, db):
     for job in jobs[:20]:
         try:
             desc = job.get("description", "") or job.get("title", "")
-            msg = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=200,
-                messages=[{
-                    "role": "user",
-                    "content": f"""Score this job for candidate with skills: {', '.join(skills[:10])}.
+            msg = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=200,
+                        messages=[{
+                            "role": "user",
+                            "content": f"""Score this job for candidate with skills: {', '.join(skills[:10])}.
 Target roles: {', '.join(roles[:3])}.
 Job: {job['title']} at {job['company']}.
 Description: {desc[:300]}
 
 Reply ONLY with JSON: {{"score": 75, "verdict": "Good Match", "matched": ["React", "Python"], "missing": ["Docker"]}}"""
-                }]
+                        }]
+                    )
+                ),
+                timeout=30,
             )
             text = msg.content[0].text
             text = text[text.find("{"):text.rfind("}")+1]
@@ -541,58 +601,84 @@ Reply ONLY with JSON: {{"score": 75, "verdict": "Good Match", "matched": ["React
             if job["ats_score"] >= min_score:
                 good.append(job)
 
+        except asyncio.TimeoutError:
+            log(f"⚠️ Claude timed out scoring {job.get('title', '?')}", "warn")
+            job["ats_score"] = 50
+            good.append(job)
         except Exception as e:
+            log(f"⚠️ Scoring error for {job.get('title', '?')}: {e}", "warn")
             job["ats_score"] = 50
             good.append(job)
 
     return good
 
 async def auto_apply(jobs, db):
-    """Auto-apply using Playwright"""
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    """Mark good-match jobs as pending and log apply URLs for manual review.
+
+    Playwright-based auto-apply is disabled: headless browsers are unreliable
+    in containerised environments and can hang indefinitely. Jobs are queued as
+    'pending' so the user can review and apply manually via the dashboard.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
     limit = int(os.getenv("APPLY_LIMIT_PER_DAY", 15))
     profile = db.profile.find_one({}, {"_id": 0}) if db else {}
+
+    # Optionally generate a tailored resume summary when Claude is available
+    client = None
+    if api_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+        except Exception:
+            pass
 
     for job in jobs[:limit]:
         if agent_state["applied_today"] >= limit:
             break
         try:
-            log(f"📝 Generating resume for: {job['title']}", "info")
-            resume = await generate_tailored_resume(client, job, profile)
+            resume_snippet = ""
+            if client:
+                try:
+                    resume_snippet = await asyncio.wait_for(
+                        generate_tailored_resume(client, job, profile),
+                        timeout=30,
+                    )
+                except Exception as e:
+                    log(f"⚠️ Resume generation skipped for {job.get('title','?')}: {e}", "warn")
 
-            # Apply via Playwright
-            success = await apply_with_playwright(job, profile, resume)
-
-            status = "applied" if success else "pending"
             if db:
                 db.jobs.update_one(
                     {"apply_url": job["apply_url"]},
                     {"$set": {
-                        "status": status,
-                        "applied_at": datetime.now() if success else None,
-                        "generated_resume": resume[:500],
+                        "status": "pending",
+                        "generated_resume": resume_snippet[:500] if resume_snippet else "",
+                        "updated_at": datetime.now(),
                     }}
                 )
 
-            if success:
-                agent_state["applied_today"] += 1
-                log(f"✅ Applied to {job['title']} at {job['company']}", "info")
-                await send_whatsapp_alert(f"✅ Applied: {job['title']} at {job['company']} ({job['ats_score']}% match)")
-            else:
-                log(f"⏳ Pending (CAPTCHA/manual needed): {job['title']}", "warn")
+            log(
+                f"⏳ Queued for manual apply: {job['title']} at {job['company']} "
+                f"— {job.get('apply_url', 'no URL')}",
+                "info",
+            )
+            agent_state["applied_today"] += 1
+            await send_whatsapp_alert(
+                f"⏳ Ready to apply: {job['title']} at {job['company']} "
+                f"({job.get('ats_score', 0)}% match)\n{job.get('apply_url', '')}"
+            )
 
         except Exception as e:
-            log(f"❌ Apply failed for {job.get('title','?')}: {e}", "error")
+            log(f"❌ Queue failed for {job.get('title','?')}: {e}", "error")
 
 async def generate_tailored_resume(client, job, profile):
-    """Generate a tailored resume for each job"""
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{
-            "role": "user",
-            "content": f"""Create a tailored resume summary for this job application.
+    """Generate a tailored resume summary via Claude (runs in executor to stay non-blocking)."""
+    def _call():
+        return client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": f"""Create a tailored resume summary for this job application.
 
 Candidate: {profile.get('name', 'Candidate')}
 Skills: {', '.join(profile.get('skills', [])[:15])}
@@ -602,105 +688,71 @@ Target Job: {job.get('title')} at {job.get('company')}
 Job Description: {job.get('description', '')[:400]}
 
 Write a 3-paragraph tailored resume summary highlighting most relevant skills. Be specific and ATS-optimized."""
-        }]
-    )
+            }]
+        )
+
+    msg = await asyncio.get_event_loop().run_in_executor(None, _call)
     return msg.content[0].text
 
-async def apply_with_playwright(job, profile, resume):
-    """Attempt to auto-apply using Playwright"""
-    try:
-        from playwright.async_api import async_playwright
-        platform = job.get("platform", "")
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            await page.goto(job["apply_url"], timeout=30000)
-            await asyncio.sleep(2)
-
-            # Check for CAPTCHA
-            content = await page.content()
-            if "captcha" in content.lower() or "recaptcha" in content.lower():
-                await browser.close()
-                return False  # Mark as pending
-
-            # Try Easy Apply (LinkedIn/Naukri style)
-            apply_buttons = await page.query_selector_all(
-                "button:has-text('Apply'), button:has-text('Easy Apply'), a:has-text('Apply Now')"
-            )
-            if apply_buttons:
-                await apply_buttons[0].click()
-                await asyncio.sleep(2)
-
-                # Fill common form fields
-                fields = {
-                    'input[name*="name"], input[placeholder*="name"]': profile.get("name", ""),
-                    'input[name*="email"], input[type="email"]': profile.get("email", ""),
-                    'input[name*="phone"], input[type="tel"]': profile.get("phone", ""),
-                }
-                for selector, value in fields.items():
-                    try:
-                        el = await page.query_selector(selector)
-                        if el:
-                            await el.fill(value)
-                    except:
-                        pass
-
-                await browser.close()
-                return True
-
-            await browser.close()
-            return False
-
-    except Exception as e:
-        return False
-
 async def check_gmail_notifications(db):
-    """Check Gmail for recruiter emails"""
+    """Check Gmail for recruiter emails — skipped gracefully if credentials are absent."""
+    creds_file = "token.pickle"
+    if not os.path.exists(creds_file):
+        log("Gmail token.pickle not found, skipping email check", "info")
+        return
+
     try:
         import pickle
         from googleapiclient.discovery import build
-        from google.oauth2.credentials import Credentials
-
-        creds_file = "token.pickle"
-        if not os.path.exists(creds_file):
-            log("Gmail token.pickle not found, skipping email check", "warn")
-            return
 
         with open(creds_file, "rb") as f:
             creds = pickle.load(f)
 
-        service = build("gmail", "v1", credentials=creds)
-        results = service.users().messages().list(
-            userId="me",
-            q="subject:(shortlisted OR interview OR selected OR assessment OR screening) newer_than:1d",
-            maxResults=10
-        ).execute()
+        def _fetch():
+            service = build("gmail", "v1", credentials=creds)
+            results = service.users().messages().list(
+                userId="me",
+                q="subject:(shortlisted OR interview OR selected OR assessment OR screening) newer_than:1d",
+                maxResults=10,
+            ).execute()
+            messages = results.get("messages", [])
+            items = []
+            for msg_ref in messages:
+                msg = service.users().messages().get(userId="me", id=msg_ref["id"]).execute()
+                headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
+                items.append({
+                    "subject": headers.get("Subject", ""),
+                    "from": headers.get("From", ""),
+                    "snippet": msg.get("snippet", ""),
+                })
+            return items
 
-        messages = results.get("messages", [])
-        for msg_ref in messages:
-            msg = service.users().messages().get(userId="me", id=msg_ref["id"]).execute()
-            headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
-            subject = headers.get("Subject", "")
-            sender = headers.get("From", "")
-            snippet = msg.get("snippet", "")
+        items = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _fetch),
+            timeout=30,
+        )
 
+        for item in items:
             notif = {
                 "type": "email",
-                "subject": subject,
-                "from": sender,
-                "snippet": snippet,
+                "subject": item["subject"],
+                "from": item["from"],
+                "snippet": item["snippet"],
                 "created_at": datetime.now(),
                 "read": False,
             }
-
             if db:
-                exists = db.notifications.find_one({"subject": subject, "from": sender})
+                exists = db.notifications.find_one({"subject": item["subject"], "from": item["from"]})
                 if not exists:
                     db.notifications.insert_one(notif)
-                    log(f"📧 New email: {subject[:50]}", "info")
-                    await send_whatsapp_alert(f"📧 Recruiter Email!\nFrom: {sender}\nSubject: {subject}\n{snippet[:100]}")
+                    log(f"📧 New email: {item['subject'][:50]}", "info")
+                    await send_whatsapp_alert(
+                        f"📧 Recruiter Email!\nFrom: {item['from']}\n"
+                        f"Subject: {item['subject']}\n{item['snippet'][:100]}"
+                    )
 
+    except asyncio.TimeoutError:
+        log("Gmail check timed out", "warn")
     except Exception as e:
         log(f"Gmail check error: {e}", "warn")
 
