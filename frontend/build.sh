@@ -1,4 +1,5 @@
+#!/usr/bin/env bash
 
-pip install --upgrade pip
-pip install -r backend/requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
 playwright install chromium
