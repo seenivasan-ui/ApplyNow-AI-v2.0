@@ -1,5 +1,7 @@
 fastapi==0.109.0
 uvicorn==0.27.0
+setuptools
+wheel
 python-dotenv==1.0.0
 pymongo==4.6.1
 anthropic==0.20.0
@@ -13,4 +15,4 @@ google-auth-httplib2==0.1.1
 google-api-python-client==2.108.0
 twilio==8.10.0
 fake-useragent==1.4.0
-pydantic==2.5.0
+pydantic>=2.4,<2.5
